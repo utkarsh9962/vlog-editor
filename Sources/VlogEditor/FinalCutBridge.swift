@@ -3,11 +3,24 @@ import AppKit
 /// Hands a project to Final Cut Pro. Final Cut has no scripting API, but it imports FCPXML when asked
 /// to open the file, building the event and project with every edit already made.
 enum FinalCutBridge {
-    static let bundleIDs = ["com.apple.FinalCut", "com.apple.FinalCutTrial"]
+    static let bundleIDs = ["com.apple.FinalCut", "com.apple.FinalCutApp", "com.apple.FinalCutTrial"]
 
+    /// Finds Final Cut Pro by its bundle ID first, then by looking in the Applications folders,
+    /// so copies Launch Services hasn't indexed (just installed, renamed, or on another volume) still count.
     static var appURL: URL? {
         for id in bundleIDs {
-            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) { return url }
+            if let url = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: id).first { return url }
+        }
+        let fm = FileManager.default
+        let folders = fm.urls(for: .applicationDirectory, in: .allDomainsMask)
+            + [URL(fileURLWithPath: "/Applications"), URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Applications")]
+        for folder in folders {
+            guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { continue }
+            for name in names where name.hasSuffix(".app") && name.localizedCaseInsensitiveContains("Final Cut Pro") {
+                let url = folder.appendingPathComponent(name)
+                let id = Bundle(url: url)?.bundleIdentifier ?? ""
+                if id.hasPrefix("com.apple.FinalCut") { return url }
+            }
         }
         return nil
     }

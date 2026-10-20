@@ -21,7 +21,7 @@ public struct EditPlan: Equatable, Sendable {
     public var segments: [Segment]
     public var music: [MediaClip]
     public var style: EditStyle
-    /// Claude's one-line description of the edit, when Claude planned it.
+    /// The AI's one-line description of the edit, when an AI planned it.
     public var notes: String? = nil
     /// On-screen captions, timed on the finished edit.
     public var captions: [Caption] = []

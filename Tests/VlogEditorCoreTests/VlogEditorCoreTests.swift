@@ -102,43 +102,52 @@ final class FCPXMLTests: XCTestCase {
     }
 }
 
-final class ClaudePlannerTests: XCTestCase {
+final class AIPlannerTests: XCTestCase {
     let beach = MediaClip(url: URL(fileURLWithPath: "/tmp/beach.mov"), duration: 30)
     let car = MediaClip(url: URL(fileURLWithPath: "/tmp/car.mov"), duration: 20, hasAudio: false)
     let song = MediaClip(url: URL(fileURLWithPath: "/tmp/song.m4a"), duration: 120, hasVideo: false)
 
-    func response(_ answer: [String: Any], stopReason: String = "end_turn") throws -> Data {
-        let text = String(data: try JSONSerialization.data(withJSONObject: answer), encoding: .utf8)!
-        return try JSONSerialization.data(withJSONObject: [
-            "stop_reason": stopReason,
-            "content": [["type": "text", "text": text]],
-        ])
+    func answer(_ object: [String: Any]) -> String {
+        String(data: try! JSONSerialization.data(withJSONObject: object), encoding: .utf8)!
     }
 
-    func testRequestCarriesDescriptionClipsFramesAndSchema() throws {
+    func testOllamaRequestCarriesDescriptionClipsFramesAndSchema() throws {
         let energy = AudioEnergy(windowSeconds: 0.5, values: [0.1, 0.1, 0.9, 0.9])
         let frame = ClipFrame(clipID: car.id, time: 5, jpeg: Data([0xFF, 0xD8]))
-        let data = try ClaudePlanner.requestBody(brief: "open on the beach", clips: [beach, car, song],
-                                                 energy: [beach.id: energy], frames: [frame])
+        let data = try OllamaPlanner.requestBody(model: "qwen2.5vl:7b", brief: "open on the beach", clips: [beach, car, song],
+                                                 energy: [beach.id: energy],
+                                                 visual: [car.id: VisualProfile(times: [5], scores: [1])], frames: [frame])
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(body["model"] as? String, "claude-opus-5-5")
-        XCTAssertEqual(body["fallbacks"] as? String, "default")
-        let config = try XCTUnwrap(body["output_config"] as? [String: Any])
-        XCTAssertEqual((config["format"] as? [String: Any])?["type"] as? String, "json_schema")
+        XCTAssertEqual(body["model"] as? String, "qwen2.5vl:7b")
+        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual((body["format"] as? [String: Any])?["type"] as? String, "object")
 
-        let content = try XCTUnwrap(((body["messages"] as? [[String: Any]])?.first)?["content"] as? [[String: Any]])
-        let intro = try XCTUnwrap(content.first?["text"] as? String)
-        XCTAssertTrue(intro.contains("open on the beach"))
-        XCTAssertTrue(intro.contains("Clip 1: beach, 30.0s"))
-        XCTAssertTrue(intro.contains("loudness per second (0 quiet to 9 loud): 19"))
-        XCTAssertTrue(intro.contains("Clip 2: car, 20.0s, horizontal\n  no sound"))
-        XCTAssertTrue(intro.contains("Music bed"))
-        XCTAssertEqual(content[1]["text"] as? String, "Clip 2 at 5.0s:")
-        XCTAssertEqual(content[2]["type"] as? String, "image")
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        let user = try XCTUnwrap(messages.last)
+        let text = try XCTUnwrap(user["content"] as? String)
+        XCTAssertTrue(text.contains("open on the beach"))
+        XCTAssertTrue(text.contains("Clip 1: beach, 30.0s"))
+        XCTAssertTrue(text.contains("loudness per second (0 quiet to 9 loud): 19"))
+        XCTAssertTrue(text.contains("Clip 2: car, 20.0s, horizontal\n  no sound"))
+        XCTAssertTrue(text.contains("5s:9"))
+        XCTAssertTrue(text.contains("Music bed"))
+        XCTAssertTrue(text.contains("in this order: clip 2 at 5.0s"))
+        XCTAssertEqual((user["images"] as? [String])?.count, 1)
+    }
+
+    func testPromptShrinksToFit() {
+        let long = MediaClip(url: URL(fileURLWithPath: "/tmp/long.mov"), duration: 1200)
+        let energy = AudioEnergy(windowSeconds: 0.5, values: (0..<2400).map { Float($0 % 7) })
+        let full = AIPlanner.prompt(brief: "", clips: [long], energy: [long.id: energy])
+        let short = AIPlanner.prompt(brief: "", clips: [long], energy: [long.id: energy], maxCharacters: 600)
+        XCTAssertGreaterThan(full.count, 1200)
+        XCTAssertLessThanOrEqual(short.count, 600)
+        XCTAssertTrue(short.contains("loudness per"))
     }
 
     func testAnswerBecomesPlanWithBadShotsFixed() throws {
-        let data = try response([
+        let text = "Here is the plan:\n" + answer([
             "shots": [
                 ["clip": 1, "start": 2.0, "end": 6.5],
                 ["clip": 2, "start": 18.0, "end": 25.0], // runs past the clip's end: trimmed to 20
@@ -148,28 +157,40 @@ final class ClaudePlannerTests: XCTestCase {
             "cross_dissolves": true,
             "title": "  Beach Day ",
             "music_volume_db": -40,
+            "captions": true,
+            "cut_to_beat": false,
             "summary": "Opens on the beach.",
         ])
-        let plan = try ClaudePlanner.plan(fromResponse: data, clips: [beach, car, song])
+        let plan = try AIPlanner.plan(fromAnswer: text, clips: [beach, car, song])
         XCTAssertEqual(plan.segments.count, 2)
         XCTAssertEqual(plan.segments[0], Segment(clipID: beach.id, sourceStart: 2, duration: 4.5))
         XCTAssertEqual(plan.segments[1].clipID, car.id)
         XCTAssertEqual(plan.segments[1].duration, 2, accuracy: 0.001)
         XCTAssertEqual(plan.style.title, "Beach Day")
         XCTAssertTrue(plan.style.crossDissolves)
+        XCTAssertTrue(plan.style.captions)
+        XCTAssertFalse(plan.style.cutToBeat)
         XCTAssertEqual(plan.style.musicVolumeDB, -30)
         XCTAssertEqual(plan.music.map(\.id), [song.id])
         XCTAssertEqual(plan.notes, "Opens on the beach.")
     }
 
-    func testRefusalAndEmptyPlansThrow() throws {
-        let declined = try response([:], stopReason: "refusal")
-        XCTAssertThrowsError(try ClaudePlanner.plan(fromResponse: declined, clips: [beach])) {
-            XCTAssertEqual($0 as? ClaudePlanner.PlannerError, .declined)
+    func testOllamaResponseAndModelList() throws {
+        let response = try JSONSerialization.data(withJSONObject: ["message": ["role": "assistant", "content": "{\"shots\":[]}"]])
+        XCTAssertEqual(try OllamaPlanner.answer(fromResponse: response), "{\"shots\":[]}")
+        let tags = try JSONSerialization.data(withJSONObject: ["models": [["name": "qwen2.5vl:7b"], ["name": "gemma3:latest"]]])
+        XCTAssertTrue(OllamaPlanner.hasModel("qwen2.5vl:7b", inTags: tags))
+        XCTAssertTrue(OllamaPlanner.hasModel("gemma3", inTags: tags))
+        XCTAssertFalse(OllamaPlanner.hasModel("gemma3:4b", inTags: tags))
+    }
+
+    func testUnreadableAndEmptyAnswersThrow() {
+        XCTAssertThrowsError(try AIPlanner.plan(fromAnswer: "sorry, I can't", clips: [beach])) {
+            XCTAssertEqual($0 as? AIPlanner.PlannerError, .unreadableAnswer)
         }
-        let empty = try response(["shots": [], "cross_dissolves": false, "title": "", "music_volume_db": -14, "summary": ""])
-        XCTAssertThrowsError(try ClaudePlanner.plan(fromResponse: empty, clips: [beach])) {
-            XCTAssertEqual($0 as? ClaudePlanner.PlannerError, .noUsableShots)
+        let empty = answer(["shots": [], "cross_dissolves": false, "title": "", "music_volume_db": -14, "summary": ""])
+        XCTAssertThrowsError(try AIPlanner.plan(fromAnswer: empty, clips: [beach])) {
+            XCTAssertEqual($0 as? AIPlanner.PlannerError, .noUsableShots)
         }
     }
 }
