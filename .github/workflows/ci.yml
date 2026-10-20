@@ -6,7 +6,12 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-26 also compiles the Apple Intelligence planner, which needs the macOS 26 SDK.
+        os: [macos-14, macos-26]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Build

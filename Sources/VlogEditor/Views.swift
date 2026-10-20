@@ -44,13 +44,15 @@ struct DropStage: View {
                 Header(title: "New vlog", subtitle: "Drop your clips, say what you want, and Final Cut Pro does the rest.")
                 Spacer()
                 Button { model.showingConnect = true } label: {
-                    Label(model.hasAPIKey ? "Claude on" : "Connect", systemImage: model.hasAPIKey ? "sparkles" : "link")
+                    Label(model.aiStatus.isReady ? model.aiStatus.label : "Connect",
+                          systemImage: model.aiStatus.isReady ? "sparkles" : "link")
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(model.hasAPIKey ? Color.accentColor : Color.secondary)
-                .help("Claude reads your description and watches your clips to plan the edit")
+                .foregroundStyle(model.aiStatus.isReady ? Color.accentColor : Color.secondary)
+                .help("Set up the free AI that plans your edits, Final Cut Pro, and captions")
             }
             .sheet(isPresented: $model.showingConnect) { ConnectSheet() }
+            .task { await model.refreshConnections() }
 
             ZStack {
                 RoundedRectangle(cornerRadius: 18)
@@ -131,11 +133,11 @@ struct ClipList: View {
     }
 }
 
-/// Connects the app to what it uses: Claude (API key), Final Cut Pro, and speech recognition for captions.
+/// Connects the app to what it uses: a free local AI, Final Cut Pro, and speech recognition for captions.
 struct ConnectSheet: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var key = ""
+    @State private var modelName = LocalAI.ollamaModel
     @State private var speech = SpeechTranscriber.status
 
     var body: some View {
@@ -145,21 +147,34 @@ struct ConnectSheet: View {
                 Text("Set these up once. You can come back here any time.").foregroundStyle(.secondary)
             }
 
-            ConnectRow(symbol: "sparkles", title: "Claude", done: model.hasAPIKey,
-                       detail: "Watches your clips and follows your description, like “open on the beach, skip the car bits”. Needs an Anthropic API key; each edit costs a few cents.") {
-                HStack {
-                    SecureField(model.hasAPIKey ? "Key saved. Paste a new one to replace it." : "Paste your API key (sk-ant-…)", text: $key)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Save") { model.saveAPIKey(key); key = "" }
-                        .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
-                    if model.hasAPIKey { Button("Remove") { model.removeAPIKey() } }
+            ConnectRow(symbol: "sparkles", title: "Free AI editor", done: model.aiStatus.isReady, detail: aiDetail) {
+                switch model.aiStatus {
+                case .ollamaMissingModel:
+                    HStack {
+                        Button(model.downloadingModel ? "Downloading…" : "Download the model") { model.downloadModel() }
+                            .disabled(model.downloadingModel)
+                        if model.downloadingModel { ProgressView().controlSize(.small) }
+                    }
+                case .none, .appleIntelligence:
+                    HStack {
+                        Link("Get Ollama (free)", destination: URL(string: "https://ollama.com/download")!)
+                        Button("Check again") { Task { await model.refreshConnections() } }
+                    }
+                case .ollama:
+                    EmptyView()
                 }
-                Link("Get a key at console.anthropic.com", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
-                    .font(.callout)
+                HStack {
+                    Text("Model").font(.callout).foregroundStyle(.secondary)
+                    TextField(OllamaPlanner.defaultModel, text: $modelName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                        .onSubmit { LocalAI.ollamaModel = modelName; Task { await model.refreshConnections() } }
+                    Text("Use gemma3:4b on Macs with 8 GB of memory.").font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             ConnectRow(symbol: "film", title: "Final Cut Pro", done: model.finalCutReady, detail: finalCutDetail) {
-                if FinalCutBridge.isInstalled {
+                if model.finalCutInstalled {
                     Button("Open Final Cut Pro") { FinalCutBridge.launch() }
                 } else {
                     Link("Get Final Cut Pro on the Mac App Store", destination: URL(string: "macappstore://apps.apple.com/app/final-cut-pro/id424389933")!)
@@ -180,7 +195,9 @@ struct ConnectSheet: View {
 
             HStack {
                 Spacer()
-                Button("Done") { model.finishConnecting(); dismiss() }
+                Button("Check again") { Task { await model.refreshConnections(); speech = SpeechTranscriber.status } }
+                    .buttonStyle(.borderless)
+                Button("Done") { LocalAI.ollamaModel = modelName; model.finishConnecting(); dismiss() }
                     .buttonStyle(PrimaryButton())
                     .keyboardShortcut(.defaultAction)
             }
@@ -189,9 +206,22 @@ struct ConnectSheet: View {
         .frame(width: 520)
     }
 
+    var aiDetail: String {
+        switch model.aiStatus {
+        case .ollama(let name):
+            return "Using \(name) through Ollama. It watches frames from your clips and follows your description. Free, and nothing leaves your Mac."
+        case .ollamaMissingModel(let name):
+            return "Ollama is running. Download \(name) (about 6 GB, once) so it can watch your clips."
+        case .appleIntelligence:
+            return "Using Apple Intelligence on this Mac: free and private. It reads the app's notes about your clips. Install Ollama too if you want it to see the frames."
+        case .none:
+            return "Install Ollama, a free app that runs AI models on your Mac, then come back and download the model. Until then the basic keyword planner is used."
+        }
+    }
+
     var finalCutDetail: String {
-        guard FinalCutBridge.isInstalled else {
-            return "Not found on this Mac. You can still export finished videos here; install it to fine-tune edits."
+        guard model.finalCutInstalled else {
+            return "Not found in your Applications folders. If it's installed somewhere else, open it once, then click Check again. You can still export finished videos here."
         }
         let version = FinalCutBridge.version ?? "unknown version"
         return model.finalCutReady

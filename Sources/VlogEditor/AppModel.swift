@@ -30,7 +30,7 @@ final class AppModel: ObservableObject {
     private var folder: URL?
 
     var videoCount: Int { clips.filter(\.hasVideo).count }
-    var finalCutInstalled: Bool { FinalCutBridge.isInstalled }
+    var finalCutInstalled: Bool { finalCutURL != nil }
 
     var projectName: String {
         if let t = EditBriefParser.parse(brief).title, !t.isEmpty { return t }
@@ -114,16 +114,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Claude plans the edit when an API key is set; otherwise, or if that fails, the keyword planner does.
+    /// A free AI on this Mac plans the edit when one is ready; otherwise, or if it fails, the keyword planner does.
     private func choosePlan() async throws -> EditPlan {
-        if let key = APIKeyStore.key {
+        aiStatus = await LocalAI.status()
+        if aiStatus.isReady {
             do {
-                stage = .working("Looking through your footage")
-                let frames = await FrameSampler.frames(for: clips)
-                stage = .working("Claude is planning your edit")
-                let body = try ClaudePlanner.requestBody(brief: brief, clips: clips, energy: energy, frames: frames)
-                let response = try await ClaudeClient.send(body, apiKey: key)
-                return try ClaudePlanner.plan(fromResponse: response, clips: clips)
+                stage = .working("\(aiStatus.label) is planning your edit")
+                if let plan = try await LocalAI.plan(status: aiStatus, brief: brief, clips: clips, energy: energy, visual: visual) {
+                    return plan
+                }
             } catch {
                 message = "\(error.localizedDescription) Used the basic planner instead."
             }
@@ -134,27 +133,35 @@ final class AppModel: ObservableObject {
         return plan
     }
 
-    // MARK: Anthropic API key
+    // MARK: Connect
 
-    @Published var hasAPIKey = APIKeyStore.key != nil
+    @Published var aiStatus: AIStatus = .none
+    @Published var downloadingModel = false
     /// The connect screen opens by itself the first time the app runs.
     @Published var showingConnect = !UserDefaults.standard.bool(forKey: "connectedOnce")
+    @Published private(set) var finalCutURL = FinalCutBridge.appURL
 
     var finalCutReady: Bool { FinalCutBridge.supportsFCPXML110 }
+
+    func refreshConnections() async {
+        finalCutURL = FinalCutBridge.appURL
+        aiStatus = await LocalAI.status()
+    }
 
     func finishConnecting() {
         UserDefaults.standard.set(true, forKey: "connectedOnce")
         showingConnect = false
     }
 
-    func saveAPIKey(_ key: String) {
-        APIKeyStore.save(key)
-        hasAPIKey = APIKeyStore.key != nil
-    }
-
-    func removeAPIKey() {
-        APIKeyStore.remove()
-        hasAPIKey = APIKeyStore.key != nil
+    func downloadModel() {
+        let model = LocalAI.ollamaModel
+        downloadingModel = true
+        Task {
+            do { try await LocalAI.pull(model) }
+            catch { message = error.localizedDescription }
+            downloadingModel = false
+            await refreshConnections()
+        }
     }
 
     private func analyzeVideo() async {
