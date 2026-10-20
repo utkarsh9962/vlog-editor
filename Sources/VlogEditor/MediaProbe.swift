@@ -86,12 +86,11 @@ enum MediaProbe {
         return seconds.isFinite && seconds >= 0 ? seconds : 0
     }
 
-    /// Loudness every half second, used to find the moments where something is happening.
-    static func audioEnergy(of url: URL) async throws -> AudioEnergy? {
+    /// Loudness every `window` seconds: half a second to find where things happen, 10 ms to find a song's beat.
+    static func audioEnergy(of url: URL, window: Double = 0.5) async throws -> AudioEnergy? {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
         let sampleRate = 8_000.0
-        let window = 0.5
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVLinearPCMBitDepthKey: 32,

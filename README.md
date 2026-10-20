@@ -4,10 +4,20 @@ A minimal Mac app: drop in your raw clips, describe the vlog you want, and Final
 
 ## How it works
 
+0. **Connect (first launch).** The Connect screen asks for your Anthropic API key (so Claude can plan edits), checks that Final Cut Pro 10.6 or later is installed, and asks for speech recognition (for captions). Final Cut Pro has no account to sign in to: the app talks to it through project files. Reopen this screen with the **Connect** button.
 1. **Drop.** Drag videos (MP4, MOV, M4V) onto the window, or choose them. A song dropped in alongside becomes the music bed.
 2. **Describe.** Type what you want in plain words, e.g. *"A fast 60 second travel vlog titled 'Lisbon Weekend' with smooth transitions"*.
-3. **Edit in Final Cut Pro.** The app listens through each clip to find where things happen, picks the shots, and writes a Final Cut Pro project (FCPXML). Final Cut opens it with every cut, dissolve, title and the music already in place, in an event called "Vlog Editor". Tweak anything there if you like.
+3. **Edit in Final Cut Pro.** The app watches and listens through each clip. With a key, Claude looks at sample frames, loudness and timing, follows your description, and picks the shots; without one, the keyword planner below does. Cuts then move onto the beats of your music, and captions are made from what people say. The app writes a Final Cut Pro project (FCPXML). Final Cut opens it with every cut, dissolve, title and the music already in place, in an event called "Vlog Editor". Tweak anything there if you like.
 4. **Export.** Where will you post it (YouTube, Shorts, Reels, Instagram feed, TikTok)? Which shape (16:9, 9:16, 1:1, 4:5, pre-picked from the platform)? What quality (720p, 1080p, 4K)? The app renders the MP4 and also saves a Final Cut project in that exact format.
+
+### What each step uses
+
+| Feature | How |
+|---|---|
+| Smarter descriptions | Claude (`claude-opus-5-5`) gets up to 80 sample frames, loudness per second and clip details, and returns the shots as JSON. Falls back to the keyword planner if there's no key or the request fails. |
+| Better shot picking | Vision face detection, sharpness (edge strength) and steadiness (change between frames 0.15s apart), blended 40/60 with loudness. |
+| Cuts on the beat | Beat tracking on the first music track; each cut moves to the nearest beat (at most 0.75s) when the clip has footage to spare. Say "ignore the beat" to turn it off. |
+| Auto captions | On-device speech recognition, grouped into lines of up to six words. They're Basic Titles in the Final Cut project and burned into the MP4. Ask for "captions" or "subtitles". |
 
 Everything lands in `~/Movies/Vlog Editor/<project name>/`.
 
@@ -43,13 +53,11 @@ swift test                    # edit-engine tests
 
 ## Code map
 
-- `Sources/VlogEditorCore/` holds the edit engine, plain Swift with no UI: `EditBrief.swift` reads the description, `EditPlanner.swift` picks the shots, `FCPXML.swift` writes the Final Cut project, `Models.swift` has the clip and export types.
-- `Sources/VlogEditor/` is the app: SwiftUI screens (`Views.swift`), flow (`AppModel.swift`), reading clips and their audio (`MediaProbe.swift`), opening Final Cut (`FinalCutBridge.swift`) and rendering the MP4 (`VideoRenderer.swift`).
+- `Sources/VlogEditorCore/` holds the edit engine, plain Swift with no UI: `EditBrief.swift` reads the description, `EditPlanner.swift` picks the shots, `ClaudePlanner.swift` builds the Claude request and checks its answer, `Beats.swift` finds the beat and snaps cuts, `Captions.swift` turns words into captions, `FCPXML.swift` writes the Final Cut project, `Models.swift` has the clip and export types.
+- `Sources/VlogEditor/` is the app: SwiftUI screens (`Views.swift`), flow (`AppModel.swift`), reading clips and their audio (`MediaProbe.swift`), picture scoring and speech recognition (`Analysis.swift`), the Claude API call, key storage and frame sampling (`ClaudeClient.swift`), opening Final Cut (`FinalCutBridge.swift`) and rendering the MP4 (`VideoRenderer.swift`).
 
 ## Next steps
 
-- Understand any description with Claude instead of keywords (e.g. "start with the beach, skip the car bits").
-- Scene and face detection with Vision, so shot choice also looks at the picture, not just the sound.
-- Beat-synced cuts to the music, auto captions, colour presets.
+- Colour presets and LUTs.
 - Cross dissolves in the rendered MP4 (today they're in the Final Cut project only).
 - MKV/AVI support (needs a converter; AVFoundation can't read them).

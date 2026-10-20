@@ -209,3 +209,24 @@ public struct ExportSettings: Equatable, Sendable {
 
     public var canvas: (width: Int, height: Int) { aspect.canvas(shortSide: quality.shortSide) }
 }
+
+/// How good each sampled moment of a clip looks, from 0 (blurry, shaky, empty) to 1 (sharp, steady, faces).
+public struct VisualProfile: Sendable, Equatable {
+    public var times: [Double]
+    public var scores: [Float]
+
+    public init(times: [Double], scores: [Float]) {
+        self.times = times
+        self.scores = scores
+    }
+
+    /// Mean score of the samples inside a time range, or of the nearest sample when none fall inside.
+    public func mean(from start: Double, duration: Double) -> Float? {
+        guard !times.isEmpty, times.count == scores.count else { return nil }
+        let inside = times.indices.filter { times[$0] >= start && times[$0] <= start + duration }
+        if !inside.isEmpty { return inside.reduce(0) { $0 + scores[$1] } / Float(inside.count) }
+        let mid = start + duration / 2
+        let nearest = times.indices.min { abs(times[$0] - mid) < abs(times[$1] - mid) }!
+        return scores[nearest]
+    }
+}

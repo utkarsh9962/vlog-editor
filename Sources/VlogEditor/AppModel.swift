@@ -25,6 +25,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var openedInFinalCut = false
 
     private var energy: [UUID: AudioEnergy] = [:]
+    private var visual: [UUID: VisualProfile] = [:]
+    private var words: [UUID: [SpokenWord]] = [:]
     private var folder: URL?
 
     var videoCount: Int { clips.filter(\.hasVideo).count }
@@ -58,6 +60,8 @@ final class AppModel: ObservableObject {
     func remove(_ clip: MediaClip) {
         clips.removeAll { $0.id == clip.id }
         energy[clip.id] = nil
+        visual[clip.id] = nil
+        words[clip.id] = nil
     }
 
     // MARK: Step 2, edit in Final Cut Pro
@@ -67,13 +71,23 @@ final class AppModel: ObservableObject {
         message = nil
         Task {
             do {
-                stage = .working("Listening through your clips")
-                await analyzeAudio()
+                stage = .working("Watching and listening through your clips")
+                async let sound: Void = analyzeAudio()
+                async let picture: Void = analyzeVideo()
+                _ = await (sound, picture)
 
-                stage = .working("Choosing the best moments")
-                let style = EditBriefParser.parse(brief)
-                let plan = EditPlanner.plan(clips: clips, style: style, energy: energy)
-                guard !plan.segments.isEmpty else { throw EditError.empty }
+                var plan = try await choosePlan()
+                let keywords = EditBriefParser.parse(brief)
+                plan.style.captions = plan.style.captions || keywords.captions
+                plan.style.cutToBeat = plan.style.cutToBeat && keywords.cutToBeat
+                if plan.style.cutToBeat, let song = plan.music.first {
+                    stage = .working("Finding the beat")
+                    plan.segments = await snapToBeat(plan.segments, song: song)
+                }
+                if plan.style.captions {
+                    stage = .working("Writing captions")
+                    plan.captions = await makeCaptions(for: plan)
+                }
                 self.plan = plan
 
                 stage = .working("Building the Final Cut Pro project")
@@ -98,6 +112,80 @@ final class AppModel: ObservableObject {
                 stage = .drop
             }
         }
+    }
+
+    /// Claude plans the edit when an API key is set; otherwise, or if that fails, the keyword planner does.
+    private func choosePlan() async throws -> EditPlan {
+        if let key = APIKeyStore.key {
+            do {
+                stage = .working("Looking through your footage")
+                let frames = await FrameSampler.frames(for: clips)
+                stage = .working("Claude is planning your edit")
+                let body = try ClaudePlanner.requestBody(brief: brief, clips: clips, energy: energy, frames: frames)
+                let response = try await ClaudeClient.send(body, apiKey: key)
+                return try ClaudePlanner.plan(fromResponse: response, clips: clips)
+            } catch {
+                message = "\(error.localizedDescription) Used the basic planner instead."
+            }
+        }
+        stage = .working("Choosing the best moments")
+        let plan = EditPlanner.plan(clips: clips, style: EditBriefParser.parse(brief), energy: energy, visual: visual)
+        guard !plan.segments.isEmpty else { throw EditError.empty }
+        return plan
+    }
+
+    // MARK: Anthropic API key
+
+    @Published var hasAPIKey = APIKeyStore.key != nil
+    /// The connect screen opens by itself the first time the app runs.
+    @Published var showingConnect = !UserDefaults.standard.bool(forKey: "connectedOnce")
+
+    var finalCutReady: Bool { FinalCutBridge.supportsFCPXML110 }
+
+    func finishConnecting() {
+        UserDefaults.standard.set(true, forKey: "connectedOnce")
+        showingConnect = false
+    }
+
+    func saveAPIKey(_ key: String) {
+        APIKeyStore.save(key)
+        hasAPIKey = APIKeyStore.key != nil
+    }
+
+    func removeAPIKey() {
+        APIKeyStore.remove()
+        hasAPIKey = APIKeyStore.key != nil
+    }
+
+    private func analyzeVideo() async {
+        let pending = clips.filter { $0.hasVideo && visual[$0.id] == nil }
+        await withTaskGroup(of: (UUID, VisualProfile?).self) { group in
+            for clip in pending {
+                group.addTask { (clip.id, await VisualAnalyzer.profile(of: clip)) }
+            }
+            for await (id, result) in group {
+                if let result { visual[id] = result }
+            }
+        }
+    }
+
+    private func snapToBeat(_ segments: [Segment], song: MediaClip) async -> [Segment] {
+        guard let envelope = try? await MediaProbe.audioEnergy(of: song.url, window: 0.01),
+              let grid = BeatDetector.detect(envelope: envelope.values, hop: envelope.windowSeconds)
+        else { return segments }
+        return BeatSnapper.snap(segments, to: grid.beats, clips: clips)
+    }
+
+    private func makeCaptions(for plan: EditPlan) async -> [Caption] {
+        let used = Set(plan.segments.map(\.clipID))
+        for clip in clips where used.contains(clip.id) && clip.hasAudio && words[clip.id] == nil {
+            do { words[clip.id] = try await SpeechTranscriber.words(in: clip) }
+            catch {
+                message = "No captions: \(error.localizedDescription)"
+                return []
+            }
+        }
+        return CaptionBuilder.captions(plan: plan, words: words)
     }
 
     private func analyzeAudio() async {
@@ -171,6 +259,8 @@ final class AppModel: ObservableObject {
         plan = nil
         projectURL = nil
         energy = [:]
+        visual = [:]
+        words = [:]
         settings = ExportSettings()
         message = nil
         stage = .drop

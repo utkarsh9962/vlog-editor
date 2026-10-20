@@ -21,6 +21,10 @@ public struct EditPlan: Equatable, Sendable {
     public var segments: [Segment]
     public var music: [MediaClip]
     public var style: EditStyle
+    /// Claude's one-line description of the edit, when Claude planned it.
+    public var notes: String? = nil
+    /// On-screen captions, timed on the finished edit.
+    public var captions: [Caption] = []
 
     public var duration: Double { segments.reduce(0) { $0 + $1.duration } }
 }
@@ -31,7 +35,12 @@ public enum EditPlanner {
     /// Gaps smaller than this between two shots of the same clip get closed, so there is no stutter cut.
     static let mergeGap = 0.4
 
-    public static func plan(clips: [MediaClip], style: EditStyle, energy: [UUID: AudioEnergy] = [:]) -> EditPlan {
+    public static func plan(
+        clips: [MediaClip],
+        style: EditStyle,
+        energy: [UUID: AudioEnergy] = [:],
+        visual: [UUID: VisualProfile] = [:]
+    ) -> EditPlan {
         let music = clips.filter(\.isAudioOnly)
         let video = order(clips.filter { $0.hasVideo && $0.duration >= minimumShot }, by: style.order)
         let total = video.reduce(0) { $0 + $1.duration }
@@ -46,7 +55,7 @@ public enum EditPlanner {
         var segments: [Segment] = []
         for clip in video {
             let budget = target * clip.duration / total
-            segments += shots(in: clip, budget: budget, pacing: style.pacing, energy: energy[clip.id])
+            segments += shots(in: clip, budget: budget, pacing: style.pacing, energy: energy[clip.id], visual: visual[clip.id])
         }
         return EditPlan(segments: segments, music: music, style: style)
     }
@@ -69,7 +78,7 @@ public enum EditPlanner {
     }
 
     /// Picks the best `budget` seconds of one clip, split into shots that suit the pacing.
-    static func shots(in clip: MediaClip, budget: Double, pacing: Pacing, energy: AudioEnergy?) -> [Segment] {
+    static func shots(in clip: MediaClip, budget: Double, pacing: Pacing, energy: AudioEnergy?, visual: VisualProfile? = nil) -> [Segment] {
         // Skip the first and last moments, where the camera is usually still being raised or lowered.
         let lead = min(0.5, clip.duration * 0.1)
         let usableStart = lead
@@ -82,8 +91,8 @@ public enum EditPlanner {
         let shotLength = max(minimumShot, wanted / Double(count))
 
         var picks: [Segment]
-        if let energy, !energy.values.isEmpty {
-            picks = loudestWindows(count: count, length: shotLength, from: usableStart, to: usableEnd, energy: energy, clipID: clip.id)
+        if let score = scorer(energy: energy, visual: visual) {
+            picks = bestWindows(count: count, length: shotLength, from: usableStart, to: usableEnd, score: score, clipID: clip.id)
         } else {
             picks = evenlySpaced(count: count, length: shotLength, from: usableStart, to: usableEnd, clipID: clip.id)
         }
@@ -101,12 +110,25 @@ public enum EditPlanner {
         }
     }
 
-    static func loudestWindows(count: Int, length: Double, from start: Double, to end: Double, energy: AudioEnergy, clipID: UUID) -> [Segment] {
+    /// Rates a window of a clip: sound counts for 60% (speech, action), picture for 40% (sharp, steady, faces).
+    static func scorer(energy: AudioEnergy?, visual: VisualProfile?) -> ((Double, Double) -> Float)? {
+        let energy = energy.flatMap { $0.values.isEmpty ? nil : $0 }
+        let visual = visual.flatMap { $0.times.isEmpty ? nil : $0 }
+        let peak = max(energy?.values.max() ?? 0, 1e-6)
+        switch (energy, visual) {
+        case (nil, nil): return nil
+        case let (e?, nil): return { e.mean(from: $0, duration: $1) / peak }
+        case let (nil, v?): return { v.mean(from: $0, duration: $1) ?? 0 }
+        case let (e?, v?): return { 0.6 * e.mean(from: $0, duration: $1) / peak + 0.4 * (v.mean(from: $0, duration: $1) ?? 0) }
+        }
+    }
+
+    static func bestWindows(count: Int, length: Double, from start: Double, to end: Double, score: (Double, Double) -> Float, clipID: UUID) -> [Segment] {
         let step = 0.25
         var candidates: [(start: Double, score: Float)] = []
         var s = start
         while s + length <= end + 0.0001 {
-            candidates.append((s, energy.mean(from: s, duration: length)))
+            candidates.append((s, score(s, length)))
             s += step
         }
         if candidates.isEmpty { return evenlySpaced(count: count, length: length, from: start, to: end, clipID: clipID) }
