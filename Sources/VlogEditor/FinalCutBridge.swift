@@ -14,6 +14,21 @@ enum FinalCutBridge {
 
     static var isInstalled: Bool { appURL != nil }
 
+    static var version: String? {
+        appURL.flatMap { Bundle(url: $0)?.infoDictionary?["CFBundleShortVersionString"] as? String }
+    }
+
+    /// The projects this app writes (FCPXML 1.10) open in Final Cut Pro 10.6 and later.
+    static var supportsFCPXML110: Bool {
+        guard let parts = version?.split(separator: ".").compactMap({ Int($0) }), parts.count >= 2 else { return isInstalled }
+        return parts[0] > 10 || (parts[0] == 10 && parts[1] >= 6)
+    }
+
+    static func launch() {
+        guard let app = appURL else { return }
+        NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+    }
+
     /// Where projects and exports go: ~/Movies/Vlog Editor/<project>/
     static func workspace(for projectName: String) throws -> URL {
         let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first!

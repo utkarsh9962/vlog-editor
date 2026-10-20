@@ -32,6 +32,10 @@ public struct EditStyle: Equatable, Sendable {
     /// Cut quiet, uneventful stretches. Off means keep every clip whole.
     public var trimToHighlights: Bool
     public var musicVolumeDB: Double
+    /// Burn spoken words in as on-screen captions.
+    public var captions: Bool
+    /// Move cuts onto the beats of the music, when there is music.
+    public var cutToBeat: Bool
 
     public init(
         targetDuration: Double? = nil,
@@ -40,7 +44,9 @@ public struct EditStyle: Equatable, Sendable {
         crossDissolves: Bool = false,
         title: String? = nil,
         trimToHighlights: Bool = true,
-        musicVolumeDB: Double = -14
+        musicVolumeDB: Double = -14,
+        captions: Bool = false,
+        cutToBeat: Bool = true
     ) {
         self.targetDuration = targetDuration
         self.pacing = pacing
@@ -49,6 +55,8 @@ public struct EditStyle: Equatable, Sendable {
         self.title = title
         self.trimToHighlights = trimToHighlights
         self.musicVolumeDB = musicVolumeDB
+        self.captions = captions
+        self.cutToBeat = cutToBeat
     }
 
     /// One plain sentence describing the style, shown back to the user.
@@ -58,6 +66,7 @@ public struct EditStyle: Equatable, Sendable {
         parts.append("\(pacing.rawValue) pacing")
         parts.append(crossDissolves ? "cross dissolves" : "straight cuts")
         if !trimToHighlights { parts.append("clips kept whole") }
+        if captions { parts.append("captions") }
         if let title { parts.append("title “\(title)”") }
         return parts.joined(separator: ", ")
     }
@@ -110,6 +119,16 @@ public enum EditBriefParser {
             style.musicVolumeDB = -18
         } else if containsAny(searchable, ["loud music", "music loud", "music up"]) {
             style.musicVolumeDB = -8
+        }
+
+        if containsAny(searchable, ["no captions", "no subtitles", "without captions", "without subtitles"]) {
+            style.captions = false
+        } else if containsAny(searchable, ["caption", "subtitle", "subtitled"]) {
+            style.captions = true
+        }
+
+        if containsAny(searchable, ["not on the beat", "ignore the beat", "no beat", "off beat", "off-beat"]) {
+            style.cutToBeat = false
         }
 
         return style

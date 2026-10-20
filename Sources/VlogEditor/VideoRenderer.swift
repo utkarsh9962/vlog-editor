@@ -82,8 +82,10 @@ enum VideoRenderer {
         videoComposition.renderSize = canvas
         videoComposition.frameDuration = CMTime(value: CMTimeValue(fps.numerator), timescale: CMTimeScale(fps.denominator))
         videoComposition.instructions = [instruction]
-        if let title = plan.style.title, !title.isEmpty {
-            videoComposition.animationTool = titleOverlay(title, canvas: canvas, duration: min(4, cursor.seconds))
+        let title = plan.style.title.flatMap { $0.isEmpty ? nil : $0 }
+        if title != nil || !plan.captions.isEmpty {
+            videoComposition.animationTool = overlay(title: title, captions: plan.captions, canvas: canvas,
+                                                     titleDuration: min(4, cursor.seconds))
         }
 
         let preset = settings.quality == .uhd4k ? AVAssetExportPresetHEVCHighestQuality : AVAssetExportPresetHighestQuality
@@ -131,14 +133,51 @@ enum VideoRenderer {
                                              y: (canvas.height - display.height * scale) / 2))
     }
 
-    /// The opening title, centered, fading in and out.
-    static func titleOverlay(_ title: String, canvas: CGSize, duration: Double) -> AVVideoCompositionCoreAnimationTool {
+    /// The opening title, centered and fading in and out, plus burned-in captions in the lower part of the frame.
+    static func overlay(title: String?, captions: [Caption], canvas: CGSize, titleDuration: Double) -> AVVideoCompositionCoreAnimationTool {
         let parent = CALayer()
         parent.frame = CGRect(origin: .zero, size: canvas)
         let video = CALayer()
         video.frame = parent.frame
         parent.addSublayer(video)
+        if let title { parent.addSublayer(titleLayer(title, canvas: canvas, duration: titleDuration)) }
+        for caption in captions { parent.addSublayer(captionLayer(caption, canvas: canvas)) }
+        return AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: video, in: parent)
+    }
 
+    static func captionLayer(_ caption: Caption, canvas: CGSize) -> CALayer {
+        let fontSize = min(canvas.width, canvas.height) * 0.055
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
+        shadow.shadowBlurRadius = fontSize * 0.15
+        let text = CATextLayer()
+        text.string = NSAttributedString(string: caption.text, attributes: [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .heavy),
+            .foregroundColor: NSColor.white,
+            .strokeColor: NSColor.black,
+            .strokeWidth: -3.0,
+            .shadow: shadow,
+        ])
+        text.alignmentMode = .center
+        text.isWrapped = true
+        text.contentsScale = 2
+        // Core Animation's origin is the bottom-left corner here, so this sits in the lower fifth.
+        text.frame = CGRect(x: canvas.width * 0.08, y: canvas.height * 0.14,
+                            width: canvas.width * 0.84, height: fontSize * 2.6)
+        text.opacity = 0
+
+        let show = CAKeyframeAnimation(keyPath: "opacity")
+        show.values = [1, 1]
+        show.keyTimes = [0, 1]
+        show.duration = caption.duration
+        show.beginTime = caption.start <= 0 ? AVCoreAnimationBeginTimeAtZero : caption.start
+        show.isRemovedOnCompletion = false
+        show.fillMode = .removed
+        text.add(show, forKey: "show")
+        return text
+    }
+
+    static func titleLayer(_ title: String, canvas: CGSize, duration: Double) -> CALayer {
         let fontSize = min(canvas.width, canvas.height) * 0.09
         let text = CATextLayer()
         text.string = NSAttributedString(string: title, attributes: [
@@ -163,8 +202,6 @@ enum VideoRenderer {
         fade.isRemovedOnCompletion = false
         fade.fillMode = .forwards
         text.add(fade, forKey: "fade")
-        parent.addSublayer(text)
-
-        return AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: video, in: parent)
+        return text
     }
 }

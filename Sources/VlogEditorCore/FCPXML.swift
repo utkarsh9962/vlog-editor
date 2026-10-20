@@ -66,6 +66,7 @@ public struct FCPXMLBuilder {
     public var titleDuration: Double = 4
 
     static let crossDissolveUID = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"
+    static let basicTitlePositionKey = "9999/999166631/999166633/1/100/101"
     static let basicTitleUID = ".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti"
 
     public init(projectName: String, eventName: String, canvasWidth: Int, canvasHeight: Int, frameRate: FrameRate? = nil) {
@@ -126,10 +127,14 @@ public struct FCPXMLBuilder {
         if let dissolveID {
             resources.append(#"<effect id="\#(dissolveID)" name="Cross Dissolve" uid="\#(Self.crossDissolveUID)"/>"#)
         }
-        let titleID: String? = plan.style.title.flatMap { $0.isEmpty ? nil : ids.next() }
-        if let titleID {
-            resources.append(#"<effect id="\#(titleID)" name="Basic Title" uid="\#(xml(Self.basicTitleUID))"/>"#)
+        let needsTitle = !(plan.style.title ?? "").isEmpty
+        let basicTitleID: String? = needsTitle || !plan.captions.isEmpty ? ids.next() : nil
+        if let basicTitleID {
+            resources.append(#"<effect id="\#(basicTitleID)" name="Basic Title" uid="\#(xml(Self.basicTitleUID))"/>"#)
         }
+        let titleID = needsTitle ? basicTitleID : nil
+        let captionTitleID = plan.captions.isEmpty ? nil : basicTitleID
+        var captionCount = 0
 
         // Spine: shots back to back, each snapped to the project's frame grid.
         var spine: [String] = []
@@ -161,6 +166,19 @@ public struct FCPXMLBuilder {
                     children.append(titleXML(ref: titleID, text: text, offset: start, duration: tDur))
                 }
                 children += musicXML(plan: plan, assetIDs: assetIDs, parentStartFrames: clipRate.frames(startSeconds), parentRate: clipRate, sequenceFrames: sequenceFrames, seqRate: seqRate)
+            }
+
+            // Captions that start during this shot ride on it, in the lane above the title.
+            let segStart = Double(cursorFrames) / seqRate.fps
+            let segEnd = Double(cursorFrames + durFrames) / seqRate.fps
+            if let captionRef = captionTitleID {
+                for caption in plan.captions where caption.start >= segStart - 0.001 && caption.start < segEnd - 0.001 {
+                    captionCount += 1
+                    let offset = FrameRate.sum(clipRate.frames(startSeconds), clipRate, seqRate.frames(caption.start - segStart), seqRate)
+                    let dur = max(1, seqRate.frames(caption.duration))
+                    children.append(captionXML(ref: captionRef, text: caption.text, offset: offset,
+                                               duration: seqRate.time(frames: dur), styleID: "tsc\(captionCount)"))
+                }
             }
 
             let formatKey = "\(clip.width)x\(clip.height)@\(clipRate.frameDuration)"
@@ -219,6 +237,19 @@ public struct FCPXMLBuilder {
         <title ref="\(ref)" lane="1" offset="\(offset)" name="\(xml(text))" duration="\(duration)">
                                     <text><text-style ref="ts1">\(xml(text))</text-style></text>
                                     <text-style-def id="ts1"><text-style font="Helvetica Neue" fontSize="110" fontFace="Bold" fontColor="1 1 1 1" alignment="center"/></text-style-def>
+                                </title>
+        """
+    }
+
+    /// A caption: a Basic Title in the lower part of the frame, white with a dark outline.
+    func captionXML(ref: String, text: String, offset: String, duration: String, styleID: String) -> String {
+        let size = Int((Double(min(canvasWidth, canvasHeight)) * 0.055).rounded())
+        let y = -Int((Double(canvasHeight) * 0.3).rounded())
+        return """
+        <title ref="\(ref)" lane="2" offset="\(offset)" name="Caption: \(xml(text))" duration="\(duration)">
+                                    <param name="Position" key="\(Self.basicTitlePositionKey)" value="0 \(y)"/>
+                                    <text><text-style ref="\(styleID)">\(xml(text))</text-style></text>
+                                    <text-style-def id="\(styleID)"><text-style font="Helvetica Neue" fontSize="\(size)" fontFace="Bold" fontColor="1 1 1 1" strokeColor="0 0 0 1" strokeWidth="3" alignment="center"/></text-style-def>
                                 </title>
         """
     }

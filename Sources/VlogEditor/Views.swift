@@ -1,4 +1,5 @@
 import AppKit
+import Speech
 import SwiftUI
 import UniformTypeIdentifiers
 import VlogEditorCore
@@ -39,7 +40,17 @@ struct DropStage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            Header(title: "New vlog", subtitle: "Drop your clips, say what you want, and Final Cut Pro does the rest.")
+            HStack(alignment: .top) {
+                Header(title: "New vlog", subtitle: "Drop your clips, say what you want, and Final Cut Pro does the rest.")
+                Spacer()
+                Button { model.showingConnect = true } label: {
+                    Label(model.hasAPIKey ? "Claude on" : "Connect", systemImage: model.hasAPIKey ? "sparkles" : "link")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(model.hasAPIKey ? Color.accentColor : Color.secondary)
+                .help("Claude reads your description and watches your clips to plan the edit")
+            }
+            .sheet(isPresented: $model.showingConnect) { ConnectSheet() }
 
             ZStack {
                 RoundedRectangle(cornerRadius: 18)
@@ -120,6 +131,107 @@ struct ClipList: View {
     }
 }
 
+/// Connects the app to what it uses: Claude (API key), Final Cut Pro, and speech recognition for captions.
+struct ConnectSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var key = ""
+    @State private var speech = SpeechTranscriber.status
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Connect").font(.title2.weight(.semibold))
+                Text("Set these up once. You can come back here any time.").foregroundStyle(.secondary)
+            }
+
+            ConnectRow(symbol: "sparkles", title: "Claude", done: model.hasAPIKey,
+                       detail: "Watches your clips and follows your description, like “open on the beach, skip the car bits”. Needs an Anthropic API key; each edit costs a few cents.") {
+                HStack {
+                    SecureField(model.hasAPIKey ? "Key saved. Paste a new one to replace it." : "Paste your API key (sk-ant-…)", text: $key)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save") { model.saveAPIKey(key); key = "" }
+                        .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if model.hasAPIKey { Button("Remove") { model.removeAPIKey() } }
+                }
+                Link("Get a key at console.anthropic.com", destination: URL(string: "https://console.anthropic.com/settings/keys")!)
+                    .font(.callout)
+            }
+
+            ConnectRow(symbol: "film", title: "Final Cut Pro", done: model.finalCutReady, detail: finalCutDetail) {
+                if FinalCutBridge.isInstalled {
+                    Button("Open Final Cut Pro") { FinalCutBridge.launch() }
+                } else {
+                    Link("Get Final Cut Pro on the Mac App Store", destination: URL(string: "macappstore://apps.apple.com/app/final-cut-pro/id424389933")!)
+                }
+            }
+
+            ConnectRow(symbol: "captions.bubble", title: "Captions", done: speech == .authorized, detail: speechDetail) {
+                if SpeechTranscriber.canAsk && speech == .notDetermined {
+                    Button("Allow speech recognition") {
+                        Task { _ = await SpeechTranscriber.requestAccess(); speech = SpeechTranscriber.status }
+                    }
+                } else if speech == .denied || speech == .restricted {
+                    Button("Open Privacy settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")!)
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") { model.finishConnecting(); dismiss() }
+                    .buttonStyle(PrimaryButton())
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(28)
+        .frame(width: 520)
+    }
+
+    var finalCutDetail: String {
+        guard FinalCutBridge.isInstalled else {
+            return "Not found on this Mac. You can still export finished videos here; install it to fine-tune edits."
+        }
+        let version = FinalCutBridge.version ?? "unknown version"
+        return model.finalCutReady
+            ? "Version \(version) found. Edits open in it automatically. It has no account to sign in to."
+            : "Version \(version) is too old. Edits need Final Cut Pro 10.6 or later."
+    }
+
+    var speechDetail: String {
+        if !SpeechTranscriber.canAsk { return "Open the packaged app (built with scripts/make-app.sh) to turn on captions." }
+        switch speech {
+        case .authorized: return "Spoken words become on-screen captions. Recognition runs on this Mac."
+        case .denied, .restricted: return "Speech recognition is turned off for this app."
+        default: return "Turns spoken words into on-screen captions. Recognition runs on this Mac."
+        }
+    }
+}
+
+struct ConnectRow<Content: View>: View {
+    let symbol: String
+    let title: String
+    let done: Bool
+    let detail: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: symbol).font(.title3).frame(width: 26).foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title).font(.headline)
+                    Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(done ? Color.green : Color.secondary)
+                }
+                Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                content
+            }
+        }
+    }
+}
+
 // MARK: - Working
 
 struct WorkingStage: View {
@@ -153,7 +265,7 @@ struct ReviewStage: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Stat(label: "Length", value: EditStyle.format(seconds: plan.duration))
                     Stat(label: "Shots", value: "\(plan.segments.count) from \(model.videoCount) clips")
-                    Stat(label: "Style", value: plan.style.summary)
+                    Stat(label: "Style", value: plan.notes ?? plan.style.summary)
                     if !plan.music.isEmpty { Stat(label: "Music", value: plan.music.map(\.name).joined(separator: ", ")) }
                 }
                 .padding(18)
